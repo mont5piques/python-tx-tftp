@@ -231,6 +231,72 @@ class FilesystemWriter(object):
             self.state = 'cancelled'
 
 
+@interface.implementer(IReader)
+class DynamicReader(object):
+    """A reader to go with L{FilesystemSynchronousBackend}.
+
+    @see: L{IReader}
+
+    @param file_path: relative file path, specified as part of a TFTP read request (RRQ)
+    @type file_path: C{bytes}
+
+    @param dyn_handler: a callback function to handle dynamic requests
+    @type dyn_handler: function
+
+    @raise FileNotFound: if dyn_handler returns None or raises an exception
+
+    """
+
+    def __init__(self, file_path, dyn_handler):
+        self.file_path = file_path
+        try:
+            self.string_data = dyn_handler(file_path)
+            if self.string_data is None:
+                raise FileNotFound(self.file_path)
+        except:
+            raise FileNotFound(self.file_path)
+        self.state = 'active'
+
+    @property
+    def size(self):
+        """
+        @see: L{IReader.size}
+
+        """
+        if self.state == 'finished':
+            return None
+        else:
+            return len(self.string_data)
+
+    def read(self, size):
+        """
+        @see: L{IReader.read}
+
+        @return: data, that was read
+        @rtype: C{bytes}
+
+        """
+
+        if self.state in ('eof', 'finished'):
+            return b''
+        if len(self.string_data) <= size:
+            data = self.string_data
+            self.string_data = ''
+        else:
+            data = self.string_data[0:size]
+            self.string_data = self.string_data[size:]
+        if not data:
+            self.state = 'eof'
+        return data
+
+    def finish(self):
+        """
+        @see: L{IReader.finish}
+
+        """
+        self.state = 'finished'
+
+
 @interface.implementer(IBackend)
 class FilesystemSynchronousBackend(object):
     """A synchronous filesystem backend.
@@ -249,12 +315,12 @@ class FilesystemSynchronousBackend(object):
 
     """
 
-    def __init__(self, base_path, can_read=True, can_write=True):
+    def __init__(self, base_path, can_read=True, can_write=True, dyn_handler=None):
         try:
             self.base = FilePath(base_path.path)
         except AttributeError:
             self.base = FilePath(base_path)
-        self.can_read, self.can_write = can_read, can_write
+        self.can_read, self.can_write, self.dyn_handler = can_read, can_write, dyn_handler
 
     @deferred
     def get_reader(self, file_name):
@@ -270,7 +336,16 @@ class FilesystemSynchronousBackend(object):
             target_path = self.base.descendant(file_name.split(b"/"))
         except InsecurePath as e:
             raise AccessViolation("Insecure path: %s" % e)
-        return FilesystemReader(target_path)
+        try:
+            # Try using FilesystemReader first
+            return FilesystemReader(target_path)
+        except FileNotFound:
+            # Try using DynamicReader if dyn_handler was supplied
+            if self.dyn_handler is not None:
+                return DynamicReader(file_name, self.dyn_handler)
+            else:
+                raise
+
 
     @deferred
     def get_writer(self, file_name):
